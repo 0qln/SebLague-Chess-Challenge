@@ -5,12 +5,12 @@ using System.Collections.Generic;
 using System.Linq; // do not use ```AsParallel()```
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using System.Xml.Linq;
+using System.Diagnostics;
 
 public class MyBot : IChessBot
 {
     // Constants
     // ===
-    int MAX_PLY = 256;
     int PV_COUNT = 100; // high value, search all lines
     int STACK_DUMMIES = 6;
 
@@ -64,9 +64,14 @@ public class MyBot : IChessBot
     bool EnoughTime => _timer.MillisecondsElapsedThisTurn <= _timer.MillisecondsRemaining / 30;
 
     int GetPieceEval(int piece, int square, int mg) 
-        => (int)(CompressedUSTablesNorm[piece * 8 + square / 8 + mg * 8] >> (square % 8 * 8) & 0xFFul) + UncompressedSPiecesNorm[mg + piece];
+        => (int) (CompressedUSTablesNorm[piece * 8 + square / 8 + mg * 8] >> (square % 8 * 8) & 0xFFul) 
+                + UncompressedSPiecesNorm[mg + piece];
 
-    int GetStackArrayIndex(int index) => index + STACK_DUMMIES;
+    int StackIndex(int index) => index + STACK_DUMMIES;
+
+    int Alpha(int value) => Math.Max(value,-(int)Value.VALUE_INFINITE);
+    int Beta (int value) => Math.Min(value, (int)Value.VALUE_INFINITE);
+
 
     // Fields
     // ===
@@ -75,155 +80,182 @@ public class MyBot : IChessBot
     Stack[] _stacks; // indexed by ply
     int[] _rootMoveScoresAVG;
     Move[] _rootMoves;
-    TTEntry[] _TT = new TTEntry[1<<22]; //Size ~4_000_000
-    int _rootDelta;
-    int _rootDepth;
+    static TTEntry[] _TT = new TTEntry[1<<22]; //Size ~4_000_000
+    int _rootDelta, _rootDepth, _currentRootMove, _bestValue;
+    Move _rootBestMove;
 
 
     public Move Think(Board board, Timer timer)
     {
         _timer = timer;
         _board = board;
-        _stacks = new Stack[MAX_PLY + STACK_DUMMIES];
+        _stacks = new Stack[(int)Value.MAX_PLY + STACK_DUMMIES];
         
         _rootMoves = board.GetLegalMoves();
 
         _rootMoveScoresAVG = new int[_rootMoves.Length];
 
-        int alpha,
-            beta,
-            delta;
-
-
         // Iterative Deepening
-        for (_rootDepth = 0; _rootDepth < MAX_PLY && EnoughTime; ++_rootDepth)
+        for (_rootDepth = 0; ++_rootDepth < (int)Value.MAX_PLY;)
         {
-            // Init pvCount, pvFirst and pvLast
-            int pvCount = Math.Min(PV_COUNT, _rootMoves.Length);
-
-            _rootMoveScoresAVG = new int[_rootMoves.Length];
-
-            // Iterate PV lines
-            for (int pvIndex = 0; pvIndex < pvCount && EnoughTime; ++pvIndex)
+            for (_currentRootMove = 0; ++_currentRootMove < _rootMoves.Length;)
             {
                 // Init alpha, beta, delta
-                int prev = _rootMoveScoresAVG[pvIndex];
-                delta = 10 + prev;//delta = 10 + prev * prev / 15799; // TODO: Remove magic numbers, probably dependent on evaluation values
-                alpha = prev - delta; ///Math.Max(prev - delta,-(int)Value.VALUE_INFINITE); // cap at infinity?
-                beta = prev + delta; ///Math.Min(prev + delta, (int)Value.VALUE_INFINITE); // cap at infinity?
+                int prev = _rootMoveScoresAVG[_currentRootMove];
+                int delta = 10 + prev * prev / 15799;
+                int alpha = Alpha(prev - delta);
+                int beta = Beta(prev + delta);
 
                 // Search with increasing asp window
+                int failHighs = 0;
                 while (true)
                 {
-                    _stacks[GetStackArrayIndex(0)].CurrentMove = _rootMoves[pvIndex];
-                    _board.MakeMove(_rootMoves[pvIndex]);
-                    var newEval = -Search(0, alpha, beta, _rootDepth, false, true, false, false);
-                    _rootMoveScoresAVG[pvIndex] = _rootDepth == 0 ? newEval : (2 * newEval + _rootMoveScoresAVG[pvIndex]) / 3;
-                    _board.UndoMove(_rootMoves[pvIndex]);
+                    _stacks[StackIndex(0)].CurrentMove = _rootMoves[_currentRootMove];
 
-                    // TODO
-                    // Sort the move
-                    // here, only the current move needs to get put into a new position. 
-                    // We inverse the scores array, so they get sorted in a descending order
+                    _board.MakeMove(_rootMoves[_currentRootMove]);
+                    int newEval = -Search(0, alpha, beta, _rootDepth - failHighs * 2, false, true, false);
+                    _board.UndoMove(_rootMoves[_currentRootMove]);
 
-                    if (_rootMoveScoresAVG[pvIndex] <= alpha)
+                    _rootMoveScoresAVG[_currentRootMove] = _rootDepth == 0 ? newEval : (newEval * 2 + _rootMoveScoresAVG[_currentRootMove]) / 3;
+
+
+                    if (newEval >= (int)Value.VALUE_MATE_IN_MAX_PLY)
+                    {
+                        Console.WriteLine("Mate found. " + _rootMoves[_currentRootMove] + " " + _rootMoveScoresAVG[_currentRootMove]);
+                        return _rootMoves[_currentRootMove];
+                    }
+
+                    // Check for a fail high/ low
+                    if (_rootMoveScoresAVG[_currentRootMove] <= alpha)
                     {
                         beta = (alpha + beta) / 2;
-                        alpha = Math.Max(_rootMoveScoresAVG[pvIndex] - delta, -(int)Value.VALUE_INFINITE);
+                        alpha = Alpha(_rootMoveScoresAVG[_currentRootMove] - delta);
+                        failHighs++;
                     }
-                    else if (_rootMoveScoresAVG[pvIndex] >= beta)
-                        beta = Math.Min(_rootMoveScoresAVG[pvIndex] + delta, (int)Value.VALUE_INFINITE);
+
+                    else if (_rootMoveScoresAVG[_currentRootMove] >= beta)
+                    {
+                        beta = Beta(_rootMoveScoresAVG[_currentRootMove] + delta);
+                        ++failHighs;
+                    }
 
                     else break;
 
 
-                    delta += delta / 3;
+                    delta += (delta / 3);
                 }
-
-                Console.Clear(); //#DEBUG
-
-                Console.WriteLine(_stacks[GetStackArrayIndex(0)].CurrentMove); //#DEBUG
-                Console.WriteLine($"Completed Depth: {_rootDepth}"); //#DEBUG
-                Console.WriteLine("moves searched: " + pvCount); //#DEBUG
-
-
-                // For some reason, `_rootMoveScores` get's sorted aswell (which is neat)
-                Array.Sort(_rootMoveScoresAVG, _rootMoves);
-                PrintRootMoves(""); //#DEBUG
             }
 
-            // For Debugging purposes
-            //for (int i = 0; i < _rootMoves.Length; i++) Console.WriteLine($"{_rootMoves[i]}: {_rootMoveScores[i]}");
+            // After each search, sort the moves
+            // For some reason, `_rootMoveScores` get's sorted aswell (which is neat)
+            Array.Sort(_rootMoveScoresAVG, _rootMoves);
+
+            if (EnoughTime) { 
+                _rootBestMove = _rootMoves[^1];
+
+                PrintRootMoves("\n\n"); //#DEBUG
+                Console.WriteLine($"Completed Depth: {_rootDepth}"); //#DEBUG
+            }
+
+            if (!EnoughTime) break;
         }
+
+
+        //PrintRootMoves("\n\n"); //#DEBUG
+        //Console.WriteLine($"Completed Depth: {_rootDepth}"); //#DEBUG
 
 
         // The best move should now be on the bottom,
         // play the last move in the `_rootMoves` array
-        return _rootMoves[^1];
+        Console.WriteLine("Play move: " + _rootBestMove);
+        return /*_rootMoves[^1]*/ _rootBestMove;
     }
 
-    void PrintRootMoves(string s) //#DEBUG
-    { //#DEBUG
-        Console.WriteLine(s); //#DEBUG
+    void PrintRootMoves(string s)   //#DEBUG
+    {                               //#DEBUG
+        Console.WriteLine(s);       //#DEBUG
         for (int i = 0; i < _rootMoves.Length; i++) //#DEBUG
-            Console.WriteLine($"{_rootMoves[i]}: {_rootMoveScoresAVG[i]}"); //#DEBUG
-    } //#DEBUG
+        {                                           //#DEBUG
+            _board.MakeMove(_rootMoves[i]);         //#DEBUG
+            Console.WriteLine($"{_rootMoves[i]}: {_rootMoveScoresAVG[i].ToString().PadRight(8)} se: {-StaticEvaluation()}"); //#DEBUG
+            _board.UndoMove(_rootMoves[i]); //#DEBUG
+        }                                   //#DEBUG
+    }                                       //#DEBUG
 
     /// <summary>
     /// Recursive search function with quies search.
     /// </summary>
     /// <returns></returns>
-    int Search(
-        int ply, 
-        int alpha, int beta, 
-        int depth, 
-        bool cutNode, bool rootNode, bool pvNode,
-        bool quies)
+    int Search(int ply, int alpha, int beta, int depth, bool cutNode, bool rootNode, in bool pvNode)
     {
-        // __Repetition__
-        if (!rootNode
-            && _board.FiftyMoveCounter >= 3
-            && alpha < 0/*draw value*/
-            && _board.IsRepeatedPosition())
-            
-            if (0/*alpha*/ >= beta) return 0/*alpha*/;
+        int fBase = 0;
+        bool quies, improving;
+
+        _stacks[StackIndex(ply)].InCheck = _board.IsInCheck();
 
 
-        // __Check Time___
-        if (!EnoughTime) return 100000;
-
-
-        // __Immediate Draw Evaluation__
-        if (!rootNode && _board.IsDraw())
-            return 0/*draw value*/;
-
-
-        // __Mate distance pruning__
         if (!rootNode)
         {
+            // __Repetition__
+            if (_board.FiftyMoveCounter >= 3
+                && alpha < (int)Value.VALUE_DRAW
+                && _board.IsRepeatedPosition())
+            {
+                alpha = (int)Value.VALUE_DRAW;
+                if (alpha >= beta) return alpha;
+            }
+
+
+            // __Immediate Draw Evaluation__
+            if (_board.IsDraw() // Check Draw
+                || ply >= (int)Value.MAX_PLY)
+                return StaticEvaluation();
+
+            // __Check time__
+            if (!EnoughTime)
+                return 30000;
+
+
+            // __Bounds Check__
+            if (ply >= (int)Value.MAX_PLY - 10)
+                return StaticEvaluation();
+
+
+            // __Mate distance pruning__
             alpha = Math.Max(-(int)Value.VALUE_MATE + ply, alpha);
-            beta = Math.Min(-(int)Value.VALUE_MATE + ply + 1, beta);
-            if (alpha >= beta)
+            beta = Math.Min((int)Value.VALUE_MATE - ply + 1, beta);
+            if (alpha > beta)
                 return alpha;
         }
-        else _rootDelta = beta - alpha;
+        else
+        {
+            Debug.Assert(alpha != beta);
+
+            _rootDelta = beta - alpha;
+        }
+
+
+        // __Quiescence search__
+        quies = depth <= 0 && !rootNode;
 
 
         // __Transposition table lookup__
         /// Note that `_stacks[ply]` hat to be initialized by now.
-        /// This will cause errors, if `_stacks does not get 
+        /// This will cause errors, if `_stacks` does not get 
         /// initialized before the Search function gets called.
-        var ttKey = _board.ZobristKey % (ulong)_TT.Length;
-        var excludedMove = _stacks[GetStackArrayIndex(ply)].ExcludedMove != Move.NullMove;
-        var tte = _TT[ttKey];
-        var ttHit = tte != default;
-        var ttValue = ttHit ? (int)Value.VALUE_NONE : tte.Value;
-        var ttMove = rootNode ? _rootMoves[0] : ttHit ? tte.Move : Move.NullMove;
-        var ttCapture = ttMove.IsCapture;
-        _stacks[GetStackArrayIndex(ply)].TTHit = ttHit;
+        ///     `_stacks` is an array of value types, thus each elemnt
+        ///     get's initialized as soon as the array is initialized.
+        ulong ttKey = _board.ZobristKey % (ulong)_TT.Length;
+        bool excludedMove = _stacks[StackIndex(ply)].ExcludedMove != Move.NullMove;
+        TTEntry tte = _TT[ttKey];
+        bool ttHit = tte != default;
+        int ttValue = ttHit ? (int)Value.VALUE_NONE : tte.Value;
+        Move ttMove = rootNode ? _rootMoves[0] : ttHit ? tte.Move : Move.NullMove;
+        bool ttCapture = ttMove.IsCapture;
+        _stacks[StackIndex(ply)].TTHit = ttHit;
 
         // this might require some dummie `Stack`s at the start of the `_stacks` array.
-        _stacks[GetStackArrayIndex(ply)].DoubleExtensions = _stacks[GetStackArrayIndex(ply) - 1].DoubleExtensions; 
+        _stacks[StackIndex(ply)].DoubleExtensions = _stacks[StackIndex(ply) - 1].DoubleExtensions; 
         // `Move.NullMove` calls the parameterless constructor, 
         // which is the default value for a Value-Type (`struct`).
         // Thus, it is the same as if we would let C# handle the
@@ -240,7 +272,7 @@ public class MyBot : IChessBot
 
         if (excludedMove && ttHit)
         {
-            _stacks[GetStackArrayIndex(ply)].TTPv = pvNode || (_stacks[GetStackArrayIndex(ply)].TTHit && tte.IsPV);
+            _stacks[StackIndex(ply)].TTPv = pvNode || (_stacks[StackIndex(ply)].TTHit && tte.IsPV); //always evaluates to false.
 
             if (!pvNode
                 && tte.Depth > depth
@@ -254,194 +286,226 @@ public class MyBot : IChessBot
         // __[[Static evaluation]] and improvement flag__
         int eval;
         if (_board.IsInCheck())
-            eval = (int)Value.VALUE_NONE;
-
-        else if (excludedMove)
-            eval = _stacks[GetStackArrayIndex(ply)].StaticEval;
-
-        else if (ttHit)
-            eval =
-                tte.Eval == (int)Value.VALUE_NONE
-                ? StaticEvaluation()
-                : tte.Eval;
-        else
         {
-            eval = StaticEvaluation();
-            // Save static evaluation into the transposition table
-            _TT[ttKey] = new TTEntry(Move.NullMove, (int)Value.VALUE_NONE, eval, (int)Value.DEPTH_NONE, pvNode, Bound.BOUND_NONE);
+            eval = fBase = quies ? -(int)Value.VALUE_INFINITE : (int)Value.VALUE_NONE;
+            improving = false;
+            goto recursive_search;
         }
 
-        _stacks[GetStackArrayIndex(ply)].StaticEval = eval;
+        else if (excludedMove && !quies)
+            eval = _stacks[StackIndex(ply)].StaticEval;
+
+        else
+        {
+            if (ttHit)
+                eval =
+                    tte.Eval == (int)Value.VALUE_NONE
+                    ? StaticEvaluation()
+                    : tte.Eval;
+            else
+            {
+                eval = StaticEvaluation();
+                // Save static evaluation into the transposition table
+                _TT[ttKey] = new TTEntry(Move.NullMove, (int)Value.VALUE_NONE, eval, (int)Value.DEPTH_NONE, pvNode, Bound.BOUND_NONE);
+            }
+
+            if (quies && eval >= beta)
+            {
+                _TT[ttKey] = new TTEntry(Move.NullMove, (int)Value.VALUE_NONE, eval, (int)Value.DEPTH_NONE, false, Bound.BOUND_LOWER);
+
+                return eval;
+            }
+
+            if (eval > alpha) alpha = eval;
+
+            fBase = eval + 200;
+        }
+
+        _stacks[StackIndex(ply)].StaticEval = eval;
 
 
         // Again, this requires dummie `Stack`s at the start of the `_stacks` array.
-        // 1: true
-        // 0: false
-        bool improving = _stacks[GetStackArrayIndex(ply) - 2].StaticEval != (int)Value.VALUE_NONE ? (_stacks[GetStackArrayIndex(ply)].StaticEval > _stacks[GetStackArrayIndex(ply) - 2].StaticEval)
-                    :    _stacks[GetStackArrayIndex(ply) - 4].StaticEval != (int)Value.VALUE_NONE ? (_stacks[GetStackArrayIndex(ply)].StaticEval > _stacks[GetStackArrayIndex(ply) - 4].StaticEval)
+        improving =     _stacks[StackIndex(ply) - 2].StaticEval != (int)Value.VALUE_NONE ? (_stacks[StackIndex(ply)].StaticEval > _stacks[StackIndex(ply) - 2].StaticEval)
+                    :   _stacks[StackIndex(ply) - 4].StaticEval != (int)Value.VALUE_NONE ? (_stacks[StackIndex(ply)].StaticEval > _stacks[StackIndex(ply) - 4].StaticEval)
                     : true;
 
 
-        // __[[Futility Pruning]]__
-        if (!_stacks[GetStackArrayIndex(ply)].TTPv
-            && depth < 9
-            && eval - ((140 - 40 * (cutNode && !ttHit ? 1 : 0)) * (depth - (improving ? 1 : 0))) - _stacks[GetStackArrayIndex(ply) - 1].StatScore / 306 >= beta
-            && eval >= beta
-            //&& eval < (int)Value.VALUE_KNOWN_WIN + 10
-            )
-            return eval;
+        //// __[[Futility Pruning]]__
+        //if (!_stacks[StackIndex(ply)].TTPv
+        //    && depth < 9
+        //    && eval - ((140 - (cutNode && !ttHit ? 40 : 0)) * depth) >= beta
+        //    && eval >= beta
+        //    && !quies)
+
+        //    return eval;
 
 
 
+recursive_search:
         // __Loop through all legal moves until no moves remain__
-        int bestValue = -(int)Value.VALUE_INFINITE, value = -(int)Value.VALUE_INFINITE;
-        int moveCount = 0;
+        int bestValue = quies ? eval : -(int)Value.VALUE_INFINITE,
+            value = -(int)Value.VALUE_INFINITE,
+            moveCount = 0;
         Move bestMove = Move.NullMove;
-        foreach (var move in _board.GetLegalMoves())
+
+        foreach (var move in _board.GetLegalMoves(quies))
         {
-            if (move == _stacks[GetStackArrayIndex(ply)].ExcludedMove)
+            if (move == _stacks[StackIndex(ply)].ExcludedMove) 
                 continue;
 
-            _stacks[GetStackArrayIndex(ply)].MoveCount = ++moveCount;
+            _stacks[StackIndex(ply)].MoveCount = ++moveCount;
 
             _board.MakeMove(move);
-            bool givesCheck = _board.IsInCheck(),
-                 capture = move.IsCapture;
+            bool
+                givesCheck = _board.IsInCheck(),
+                capture = move.IsCapture,
+                fullSearch = false;
             _board.UndoMove(move);
-            int newDepth = depth - 1;
-            int extension = 0;
-            int delta = beta - alpha;
-            var movedPiece = move.MovePieceType;
 
-            int r_ = Reduction(depth) - Reduction(_stacks[GetStackArrayIndex(ply)].MoveCount);
-            int r = (r_ + 1372 - delta * 1073 / _rootDelta) / 1024 + (!improving && r_  > 936 ? 1 : 0);
-
-
-            // __Pruning at shallow depth__
-            int lmrDepth = newDepth - r;
-
-            if (!rootNode
-              /*&& npm of this color > 0*/)
-            {
-                // Skip quiet moves if movecount exceeds our FutilityMoveCount threshold (~8 Elo)
-
-                if (capture
-                    || givesCheck)
-                {
-
-                    // Futility pruning for captures (~2 Elo)
-
-                    // SEE based pruning (~11 Elo)
-                }
-                else
-                {
-
-                    // Continuation history based pruning (~2 Elo)
-
-                    // Futility pruning: parent node (~13 Elo)
-
-                    // Prune moves with negative SEE (~4 Elo)
-                }
-            }
-
-            // __Extensions__
-            if (ply < _rootDepth*2)
-            {
-                // SES
-                if (!rootNode
-                    && depth >= 4
-                    && move == ttMove
-                    && !excludedMove
-                    && ttValue != (int)Value.VALUE_NONE
-                    && ((tte.Bound & Bound.BOUND_LOWER) == 0 ? false : true)  // tte.Bound == Bound.BOUND_EXACT || tte.Bound == Bound.BOUND_LOWER
-                    && tte.Depth >= depth - 3)
-                {
-                    var sBeta = ttValue;
-                    var sDepth = (depth - 1) / 2;
-
-                    _stacks[GetStackArrayIndex(ply)].ExcludedMove = move;
-                    value = Search(ply, sBeta - 1, sBeta, sDepth, cutNode, false, false, false);
-                    _stacks[GetStackArrayIndex(ply)].ExcludedMove = Move.NullMove;
-
-                    if (value < sBeta)
-                    {
-                        extension = 1;
-
-                        if (!pvNode
-                            && value < sBeta - 21
-                            && _stacks[GetStackArrayIndex(ply)].DoubleExtensions <= 11)
-                        {
-                            extension = 2;
-                            depth += depth < 13 ? 1 : 0;
-                        }
-                    }
-
-                    else if (sBeta >= beta) return sBeta;
-
-                    else if (ttValue >= beta) extension = -2 - (pvNode ? 0 : 1);
-
-                    else if (cutNode) extension = depth > 8 && depth < 17 ? -3 : -1;
-
-                    else if (ttValue <= value) extension = -1;
-                }
-
-                else if (
-                    givesCheck
-                    &&  depth > 9)
-                    extension = 1;
-            }
-
-            // Update vars after SES
-            newDepth += extension;
-            _stacks[GetStackArrayIndex(ply)].DoubleExtensions = _stacks[GetStackArrayIndex(ply) - 1].DoubleExtensions + (extension == 2 ? 1 : 0);
-            _stacks[GetStackArrayIndex(ply)].CurrentMove = move;
-            // TODO
-            _stacks[GetStackArrayIndex(ply)].StatScore = 0;
+            int newDepth = depth - 1, 
+                extension = 0, 
+                delta = beta - alpha,
+                r = 0,
+                d = 0;
 
 
+            //if (!quies)
+            //{
+            
+            //    r = Reduction(depth) - Reduction(_stacks[StackIndex(ply)].MoveCount);
+            //    r = (r + 1372 - delta * 1073 / _rootDelta) / 1024 + (!improving && r  > 936 ? 1 : 0);
+
+            //    // __Pruning at shallow depth__
+            //    int lmrDepth = newDepth - r;
+
+            //    if (!rootNode 
+            //      /*&& npm of this color > 0*/)
+            //    {
+            //        // Skip quiet moves if movecount exceeds our FutilityMoveCount threshold (~8 Elo)
+
+            //        if (capture
+            //            || givesCheck)
+            //        {
+
+            //            // Futility pruning for captures (~2 Elo)
+
+            //            // SEE based pruning (~11 Elo)
+            //        }
+            //        else
+            //        {
+
+            //            // Continuation history based pruning (~2 Elo)
+
+            //            // Futility pruning: parent node (~13 Elo)
+
+            //            // Prune moves with negative SEE (~4 Elo)
+            //        }
+            //    }
+
+            //    // __Extensions__
+            //    if (ply < _rootDepth*2)
+            //    {
+            //        // SES
+            //        if (!rootNode
+            //            && depth >= 4
+            //            && move == ttMove
+            //            && !excludedMove
+            //            && ttValue != (int)Value.VALUE_NONE
+            //            && ((tte.Bound & Bound.BOUND_LOWER) == 0 ? false : true)  // tte.Bound == Bound.BOUND_EXACT || tte.Bound == Bound.BOUND_LOWER
+            //            && tte.Depth >= depth - 3)
+            //        {
+            //            var sBeta = ttValue;
+            //            var sDepth = (depth - 1) / 2;
+
+            //            _stacks[StackIndex(ply)].ExcludedMove = move;
+            //            value = Search(ply, sBeta - 1, sBeta, sDepth, cutNode, false, false);
+            //            _stacks[StackIndex(ply)].ExcludedMove = Move.NullMove;
+
+            //            if (value < sBeta)
+            //            {
+            //                extension = 1;
+
+            //                if (!pvNode
+            //                    && value < sBeta - 21
+            //                    && _stacks[StackIndex(ply)].DoubleExtensions <= 11)
+            //                {
+            //                    extension = 2;
+            //                    depth += depth < 13 ? 1 : 0;
+            //                }
+            //            }
+
+            //            else if (sBeta >= beta) return sBeta;
+
+            //            else if (ttValue >= beta) extension = -2 - (pvNode ? 0 : 1);
+
+            //            else if (cutNode) extension = depth > 8 && depth < 17 ? -3 : -1;
+
+            //            else if (ttValue <= value) extension = -1;
+            //        }
+
+            //        else if (
+            //            givesCheck
+            //            &&  depth > 9)
+            //            extension = 1;
+            //    }
+
+            //    // Update vars after SES
+            //    newDepth += extension;
+            //    _stacks[StackIndex(ply)].DoubleExtensions = _stacks[StackIndex(ply) - 1].DoubleExtensions + (extension == 2 ? 1 : 0);
+            //    _stacks[StackIndex(ply)].CurrentMove = move;
+            //}
+
+            
             // __Make the move__
             _board.MakeMove(move);
 
 
             // __[[Late Move Reduction]]__
-            if (_stacks[GetStackArrayIndex(ply) + 1].CutoffCount > 8) r++;
-            if (cutNode) r += 2;
-            if (ttCapture) r++;
-            
-            if (depth >= 2
-                && moveCount > 1 + (pvNode && ply <= 1 ? 1 : 0)
-                && (!_stacks[GetStackArrayIndex(ply)].TTPv
-                    || !capture)) // || (cutNode && (ss-1)->moveCount > 1) ?
-            {
-                int d = Math.Clamp(newDepth - r, 1, newDepth + 1);
-                value = -Search(ply + 1, -(alpha + 1), -alpha, d, true, false, false, d <= 0);
+            //if (_stacks[StackIndex(ply) + 1].CutoffCount > 8) r++;
+            //if (cutNode) r += 2;
+            //if (ttCapture) r++;            
 
-                // research on a fail high
-                if (value > alpha && d < newDepth)
-                {
-                    int doDeeperSearch = value > (bestValue + 64 + 11 * (newDepth - d)) ? 1 : 0;
-                    int doEvenDeeperSearch = value > alpha + 711 && _stacks[GetStackArrayIndex(ply)].DoubleExtensions <= 6 ? 1 : 0;
-                    int doShallowerSearch = value < bestValue + newDepth ? 1 : 0;
+            //// In quiescend search, we only look at captures. Thus [marked condition]
+            //// Is always checks for quiescent search aswell and LMR will always be skipped
+            //// in quiescend search and we don't need to check for it explicitly.
+            //if (depth >= 2
+            //    && moveCount > 1 + (pvNode && ply <= 1 ? 1 : 0)
+            //    && (!_stacks[StackIndex(ply)].TTPv
+            //        || !capture ) // marked condition
+            //    /*&& !quies*/) 
+            //{
+            //    d = Math.Clamp(newDepth - r, 1, newDepth + 1);
+            //    value = -Search(ply + 1, -(alpha + 1), -alpha, d, true, false, false);
 
-                    _stacks[GetStackArrayIndex(ply)].DoubleExtensions += doEvenDeeperSearch;
+            //    // Research on a fail high
+            //    if (value > alpha && d < newDepth)
+            //    {
+            //        int doDeeperSearch = value > (bestValue + 64 + 11 * (newDepth - d)) ? 1 : 0;
+            //        int doEvenDeeperSearch = value > alpha + 711 && _stacks[StackIndex(ply)].DoubleExtensions <= 6 ? 1 : 0;
+            //        int doShallowerSearch = value < bestValue + newDepth ? 1 : 0;
 
-                    newDepth += doDeeperSearch - doShallowerSearch + doEvenDeeperSearch;
+            //        _stacks[StackIndex(ply)].DoubleExtensions += doEvenDeeperSearch;
 
-                    if (newDepth > d)
-                        value = -Search(ply + 1, -(alpha + 1), -alpha, newDepth, !cutNode, false, false, newDepth <= 0);
-                }
+            //        newDepth += doDeeperSearch - doShallowerSearch + doEvenDeeperSearch;
 
+            //        if (newDepth > d)
+            //            value = -Search(ply + 1, -(alpha + 1), -alpha, newDepth, !cutNode, false, false);
+            //    }
+            //}
 
-            }
+            //// __Full-depth search when LMR is skipped__
+            //else if (!pvNode || moveCount > 1)
+            //{
+            //    if (ttMove.IsNull && cutNode) r += 2;
+            //    d = newDepth - (r > 3 ? 1 : 0);
+            //    fullSearch = true;
+            //}
 
-
-            // __Full-depth search when LMR is skipped__
-            else if (!pvNode || moveCount > 1)
-            {
-                if (ttMove.IsNull && cutNode) r += 2;
-                int d = newDepth - (r > 3 ? 1 : 0);
-                value = -Search(ply + 1, -beta, -alpha, d, false, false, false, d <= 0);
-            }
+            // __Perform the full depth search__
+            // If we dove into quies or we have to research with a full
+            // window after LMR was skipped.
+            //if (quies || fullSearch) 
+                value = -Search(ply + 1, -beta, -alpha, /*d*/ newDepth, false, false, false);
 
 
             // __Undo Move__
@@ -449,26 +513,19 @@ public class MyBot : IChessBot
 
 
             // __Check for a new best move___
-            //if (rootNode)
-            //{
-            //    if (moveCount == 1 || value > alpha)
-            //    {
-
-            //    }
-            //}
-
-
             if (value > bestValue)
             {
                 bestMove = move;
+
                 bestValue = value;
 
                 if (value > alpha)
                 {
                     if (value >= beta)
                     {
-                        _stacks[GetStackArrayIndex(ply)].CutoffCount += 1 + (ttMove.IsNull ? 0 : 1);
+                        _stacks[StackIndex(ply)].CutoffCount += 1 + (ttMove.IsNull ? 0 : 1);
 
+                        // Fail high
                         break;
                     }
                     else
@@ -477,21 +534,19 @@ public class MyBot : IChessBot
                     }
                 }
             }
-
-
         }
 
         // __Check for mate and stalemate__
         if (moveCount == 0)
-            bestValue = excludedMove ? alpha :
-                        _stacks[GetStackArrayIndex(ply)].InCheck    ? -(int)Value.VALUE_INFINITE + ply
-                                                                    :  (int)Value.VALUE_DRAW;
+            bestValue = _stacks[StackIndex(ply)].InCheck    
+                ? -(int)Value.VALUE_INFINITE + ply
+                :  (int)Value.VALUE_DRAW;
 
-        if (!excludedMove
-            && (!rootNode))
-        {
-            _TT[ttKey] = new TTEntry(bestMove, bestValue, eval, depth, pvNode, bestValue >= beta ? Bound.BOUND_LOWER : pvNode && !bestMove.IsNull ? Bound.BOUND_EXACT : Bound.BOUND_UPPER);
-        }
+
+        // __Make TTEntry and return__
+        if ((!excludedMove && !rootNode) || quies)
+            _TT[ttKey] = new TTEntry(bestMove, bestValue, eval, depth, pvNode, 
+                bestValue >= beta ? Bound.BOUND_LOWER : quies ? Bound.BOUND_UPPER : pvNode && !bestMove.IsNull ? Bound.BOUND_EXACT : Bound.BOUND_UPPER);
 
         return bestValue;
     }
@@ -504,10 +559,9 @@ public class MyBot : IChessBot
     /// <returns></returns>
     int StaticEvaluation()
     {
-        int mg = 0, 
-            eg = 0, 
-            phase = 0,
-            square;
+        int mg = 0,
+            eg = 0,
+            phase = 0;
 
         foreach (bool white in new[] { true, false })
         {
@@ -517,7 +571,7 @@ public class MyBot : IChessBot
                 while (mask != 0)
                 {
                     phase += PhaseValues[piece];
-                    square = BitboardHelper.ClearAndGetIndexOfLSB(ref mask) ^ (white ? 56 : 0);
+                    var square = BitboardHelper.ClearAndGetIndexOfLSB(ref mask) ^ (white ? 56 : 0);
                     mg += GetPieceEval(piece - 1, square, 0);
                     eg += GetPieceEval(piece - 1, square, 6);
                 }
@@ -527,7 +581,9 @@ public class MyBot : IChessBot
             eg = -eg;
         }
 
-        return (mg * phase + eg * (5255 - phase)) / 5255 * (_board.IsWhiteToMove ? 1 : -1);
+        return (int)(
+            (mg * phase + eg * (5255 - phase)) / 5255 * (_board.IsWhiteToMove ? 2 : -2)
+        );
     }
 }
 
@@ -563,7 +619,6 @@ record struct Stack
     public Move Killer1;
     public Move Killer2;
     public int StaticEval;
-    public int StatScore;
     public int MoveCount;
     public bool InCheck;
     public bool TTPv;
