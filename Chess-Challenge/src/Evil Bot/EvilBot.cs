@@ -177,13 +177,13 @@ namespace ChessChallenge.Example
             // https://www.chessprogramming.org/Iterative_Deepening
             for (int depth = 1; depth <= 50; depth++)
             {
-                Console.WriteLine($"Depth: {depth}");   //#DEBUG
-
                 int score = Search(board, timer, -30000, 30000, depth, 0);
 
                 // Out of time
                 if (timer.MillisecondsElapsedThisTurn >= timer.MillisecondsRemaining / 30)
                     break;
+
+                Console.WriteLine($"Depth: {depth}");   //#DEBUG
             }
             return bestmoveRoot.IsNull ? board.GetLegalMoves()[0] : bestmoveRoot;
         }
