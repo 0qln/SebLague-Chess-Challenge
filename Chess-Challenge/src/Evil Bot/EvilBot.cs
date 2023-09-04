@@ -171,20 +171,18 @@ namespace ChessChallenge.Example
 
         public Move Think(Board board, Timer timer)
         {
-            Console.WriteLine("EvilBot");
-
+            int depth;
             bestmoveRoot = Move.NullMove;
             // https://www.chessprogramming.org/Iterative_Deepening
-            for (int depth = 1; depth <= 50; depth++)
+            for (depth = 1; depth <= 50; depth++)
             {
                 int score = Search(board, timer, -30000, 30000, depth, 0);
 
                 // Out of time
                 if (timer.MillisecondsElapsedThisTurn >= timer.MillisecondsRemaining / 30)
                     break;
-
-                Console.WriteLine($"Depth: {depth}");   //#DEBUG
             }
+            
             return bestmoveRoot.IsNull ? board.GetLegalMoves()[0] : bestmoveRoot;
         }
     }

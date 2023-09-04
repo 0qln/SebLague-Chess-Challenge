@@ -35,7 +35,7 @@ public class MyBot : IChessBot
 
     // Constants
     // =========
-    int STACK_DUMMIES = 6;
+    static int STACK_DUMMIES = 6;
 
     // Pawn, Knight, Bishop, Rook, Queen, King 
     short[] PieceValues = { 82, 337, 365, 477, 1025, 0,     // Middlegame
@@ -47,7 +47,6 @@ public class MyBot : IChessBot
 
     // Getters/Setters
     // ===============
-    int StackIndex(int index) => index + STACK_DUMMIES;
     //int Alpha(int value) => Math.Max(value,-(int)Value.VALUE_INFINITE);
     //int Beta (int value) => Math.Min(value, (int)Value.VALUE_INFINITE);
     // [Used_time] > [Total_time] / [Avarage_moves_in_a_game]
@@ -62,13 +61,15 @@ public class MyBot : IChessBot
     Timer _timer;
     Board _board;
 
-    // indexed by ply
-    Stack[] _stacks; 
+    long _nodesSearched = 0;
+
+    // storing data foreach ply, indexed by `ply` + `STACK_DUMMIES`
+    Stack[] _stacks = new Stack[(int)Value.MAX_PLY + STACK_DUMMIES];
+
     // Transposition Table
-    // Size: 1<<22 = 0x400000
+    // performing worse when marked as `static`... i believe
+    // this shouldn't be case for a good TT implementation
     TTEntry[] _TT = new TTEntry[0x400000];
-    // the current depth in the iterative deepening loop
-    int _rootDepth;
 
 
 
@@ -76,28 +77,31 @@ public class MyBot : IChessBot
     // =============================
     public Move Think(Board board, Timer timer)
     {
-        Console.WriteLine("MyBot"); //#DEBUG
-
-
         _timer = timer;
         _board = board;
-        _stacks = new Stack[(int)Value.MAX_PLY + STACK_DUMMIES];
+        // performing better if this is not reset, also
+        // saves tokens
+        ///_stacks.Initialize();
 
 
         // Iterative Deepening
-        _rootDepth = 0;
+        int _rootDepth = 0;
         while ( ++_rootDepth < (int)Value.MAX_PLY
                 && EnoughTime)
         {
-            Search(-1, -(int)Value.VALUE_INFINITE, (int)Value.VALUE_INFINITE, _rootDepth, false, true);
-
-            Console.WriteLine($"Depth: {_rootDepth}");   //#DEBUG
+            Search(-1, -(int)Value.VALUE_INFINITE, (int)Value.VALUE_INFINITE, _rootDepth, false, false);
         }
         
+        if (Debugger.IsAttached) //#DEBUG
+        {
+            Console.WriteLine($"Depth: {_rootDepth}"); //#DEBUG
+            Console.WriteLine($"kNPS: {_nodesSearched / _timer.MillisecondsElapsedThisTurn}"); //#DEBUG
+        }
+
         
         // The best move should now be on the bottom,
         // play the last move in the `_rootMoves` array
-        return _stacks[StackIndex(0)].Pv;
+        return _stacks[STACK_DUMMIES].Pv;
     }
 
 
@@ -135,8 +139,10 @@ public class MyBot : IChessBot
     /// <returns></returns>
     int Search(int ply, int alpha, int beta, int depth, bool cutNode, bool pvNode)
     {
+        if (Debugger.IsAttached) ++_nodesSearched; //#DEBUG
+
         // __Quiescence search__
-        ref Stack stack = ref _stacks[StackIndex(++ply)];
+        ref Stack stack = ref _stacks[++ply + STACK_DUMMIES];
         ref TTEntry tte = ref _TT[_board.ZobristKey % 0x400000];
         bool root = ply == 0, quies = --depth <= 0, ttHit = tte != default;
         int bestEval = -(int)Value.VALUE_INFINITE, eval, parentAlpha = alpha;
@@ -164,10 +170,10 @@ public class MyBot : IChessBot
 
 
         // __Transposition table lookup__
-        // this can never be true in the root, because there are no tte made 
-        // at the root depth
-        stack.TTPv = pvNode || tte.IsPV;
-        if (!pvNode
+        // this can never be true in the root, because there are no ttes
+        // made at the root depth
+        ///stack.TTPv = pvNode || tte.IsPV;
+        if (!pvNode && ttHit
             && tte.Depth > depth
             && tte.Eval != (int)Value.VALUE_NONE
             && (tte.Bound & (tte.Eval >= beta ? Bound.BOUND_LOWER : Bound.BOUND_UPPER)) != 0)
@@ -195,9 +201,6 @@ public class MyBot : IChessBot
                 // tt pv
                 move == tte.Pv ? 20000 :
 
-                // stack pv
-                move == stack.Pv ? 15000 :
-
                 // killers
                 move == stack.Killer ? 10000 :
 
@@ -215,8 +218,7 @@ public class MyBot : IChessBot
         {
             bestEval = eval;
 
-            if (bestEval >= beta
-                || moves.Length == 0)
+            if (bestEval >= beta)
                 return bestEval;
 
             if (bestEval > alpha) 
@@ -310,7 +312,7 @@ public class MyBot : IChessBot
         { //#DEBUG
 
 
-            Console.WriteLine(StringPV); //#DEBUG
+            ///Console.WriteLine(StringPV); //#DEBUG
 
 
         } //#DEBUG
