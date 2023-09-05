@@ -118,7 +118,7 @@ namespace ChessChallenge.Example
             // Search moves
             for (int i = 0; i < moves.Length; i++)
             {
-                if (timer.MillisecondsElapsedThisTurn >= timer.MillisecondsRemaining / 30)
+                if (timer.MillisecondsElapsedThisTurn >= timer.MillisecondsRemaining / 40)
                     return 30000;
 
                 // Incrementally sort moves
@@ -179,7 +179,7 @@ namespace ChessChallenge.Example
                 int score = Search(board, timer, -30000, 30000, depth, 0);
 
                 // Out of time
-                if (timer.MillisecondsElapsedThisTurn >= timer.MillisecondsRemaining / 30)
+                if (timer.MillisecondsElapsedThisTurn >= timer.MillisecondsRemaining / 40)
                     break;
             }
             

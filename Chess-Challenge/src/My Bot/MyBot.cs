@@ -50,7 +50,8 @@ public class MyBot : IChessBot
     //int Alpha(int value) => Math.Max(value,-(int)Value.VALUE_INFINITE);
     //int Beta (int value) => Math.Min(value, (int)Value.VALUE_INFINITE);
     // [Used_time] > [Total_time] / [Avarage_moves_in_a_game]
-    bool EnoughTime => _timer.MillisecondsElapsedThisTurn <= _timer.MillisecondsRemaining / 30;
+    bool EnoughTime => _timer.MillisecondsElapsedThisTurn <= _timer.MillisecondsRemaining / Divisor;
+    int Divisor => 30 + 100000 / _timer.GameStartTimeMilliseconds;
 
     //int Reduction(int i) => 20 * (int)Math.Log(i);
 
@@ -70,6 +71,8 @@ public class MyBot : IChessBot
     // performing worse when marked as `static`... i believe
     // this shouldn't be case for a good TT implementation
     TTEntry[] _TT = new TTEntry[0x400000];
+    
+    int _rootDepth;
 
 
 
@@ -77,25 +80,26 @@ public class MyBot : IChessBot
     // =============================
     public Move Think(Board board, Timer timer)
     {
+        // performing about equal if this is not reset, also
+        // saves tokens; enabled for a more predictable
+        // plying style for debugging
+        _stacks.Initialize();
         _timer = timer;
         _board = board;
-        // performing better if this is not reset, also
-        // saves tokens
-        ///_stacks.Initialize();
-
+        _nodesSearched = 0;
 
         // Iterative Deepening
-        int _rootDepth = 0;
+        _rootDepth = 0;
         while ( ++_rootDepth < (int)Value.MAX_PLY
                 && EnoughTime)
         {
-            Search(-1, -(int)Value.VALUE_INFINITE, (int)Value.VALUE_INFINITE, _rootDepth, false, false);
+            Search(0, -(int)Value.VALUE_INFINITE, (int)Value.VALUE_INFINITE, _rootDepth, 4);
         }
         
         if (Debugger.IsAttached) //#DEBUG
         {
             Console.WriteLine($"Depth: {_rootDepth}"); //#DEBUG
-            Console.WriteLine($"kNPS: {_nodesSearched / _timer.MillisecondsElapsedThisTurn}"); //#DEBUG
+            Console.WriteLine($"kNPS: {_nodesSearched / (1+_timer.MillisecondsElapsedThisTurn)}"); //#DEBUG
         }
 
         
@@ -137,16 +141,18 @@ public class MyBot : IChessBot
     /// Recursive search function with quies search.
     /// </summary>
     /// <returns></returns>
-    int Search(int ply, int alpha, int beta, int depth, bool cutNode, bool pvNode)
+    int Search(int ply, int alpha, int beta, int depth, int pvNode)
     {
         if (Debugger.IsAttached) ++_nodesSearched; //#DEBUG
 
         // __Quiescence search__
-        ref Stack stack = ref _stacks[++ply + STACK_DUMMIES];
+        ref Stack stack = ref _stacks[/*++*/ply + STACK_DUMMIES];
         ref TTEntry tte = ref _TT[_board.ZobristKey % 0x400000];
-        bool root = ply == 0, quies = --depth <= 0, ttHit = tte != default;
+        bool root = ply == 0, quies = /*--*/depth <= 0/* && !_board.IsInCheck()*/, ttHit = tte != default;
         int bestEval = -(int)Value.VALUE_INFINITE, eval, parentAlpha = alpha;
-        Move bestMove = default; //`default` is the same as the paramterless contsr., which is the same as Move.NullMove
+        //`default` is the same as the paramterless contsr., which is the same as Move.NullMove
+        Move bestMove = default; 
+        bool excludedMove = stack.ExcludedMove != default, isPV = pvNode >= 0;
 
 
         if (!root)
@@ -158,11 +164,7 @@ public class MyBot : IChessBot
 
             // __Bounds Check__
             // We can assume that we will never reach a ply of 246.
-            //if (ply == (int)Value.MAX_PLY
-            //    || depth <= 0) // this will be replaced by qsearch 
-            //    return staticEval;
-
-
+            
 
             // __Mate distance pruning__
 
@@ -172,8 +174,8 @@ public class MyBot : IChessBot
         // __Transposition table lookup__
         // this can never be true in the root, because there are no ttes
         // made at the root depth
-        ///stack.TTPv = pvNode || tte.IsPV;
-        if (!pvNode && ttHit
+        stack.TTPv = isPV || tte.IsPV;
+        if (!isPV && ttHit
             && tte.Depth > depth
             && tte.Eval != (int)Value.VALUE_NONE
             && (tte.Bound & (tte.Eval >= beta ? Bound.BOUND_LOWER : Bound.BOUND_UPPER)) != 0)
@@ -184,11 +186,6 @@ public class MyBot : IChessBot
 
         // __[[Static evaluation]] and improvement flag__
         stack.StaticEval = eval = Evaluate();
-
-
-
-        // __[[Futility Pruning]]__
-
 
 
         // __Sorting__
@@ -213,6 +210,36 @@ public class MyBot : IChessBot
         Array.Sort(scores, moves);
 
 
+        // __[[Futility Pruning]]__
+        // this should get skipped, if in check to avoid mate
+        // blindness and if the there are no legal moves, 
+        // to avoid draw blindness
+        if (!isPV
+            && !quies
+            && !stack.TTPv
+            && !root
+            && !_board.IsInCheck()
+            && moves.Length != 0
+            && eval - 100 * depth >= beta)
+        {
+            return eval - 100 * depth;
+        }
+
+
+        // __Reverse Futility Pruning__
+        //var fmargin = 2 * PieceValues[ply % 6];
+        //if (!_board.IsInCheck()
+        //    && !stack.TTPv
+        //    && !root
+        //    && depth < 9
+        //    && moves.Length != 0
+        //    && eval - fmargin >= beta)
+        //{
+        //    return eval - fmargin;
+        //}
+
+
+
         // __Quiescent search__
         if (quies)
         {
@@ -229,31 +256,66 @@ public class MyBot : IChessBot
         // __Loop through all legal moves__
         for(int i = 0; i < moves.Length; i++)
         {
+            int newDepth = depth-1, 
+                newPly = ply+1,
+                extensions = 0;
+            int pv = 5-i;
+
             if (!quies)
             {
                 // __Pruning at shallow depth__
 
-                
-                // __Extensions__
 
+                // __Extensions__
+                //if (_rootDepth > depth * 2)
+                //{
+                //    if (!root
+                //        && !excludedMove
+                //        && moves[i] == tte.Pv
+                //        && tte.Depth >= depth - 3
+                //        && tte.Bound != Bound.BOUND_NONE)
+                //    {
+                //        var d = depth / 2;
+                //        var b = tte.Eval - depth * 10;
+
+                //        stack.ExcludedMove = moves[i];
+                //        eval = Search(ply, b - 1, b, d, cutNode, false);
+                //        stack.ExcludedMove = default;
+
+                //        if (eval < b)
+                //        {
+                //            extensions++;
+
+                //            if (!pvNode
+                //                && eval < b - 50
+                //                && stack.DoubleExtensions <= 11)
+                //            {
+                //                extensions++;
+                //                newDepth += depth < 13 ? 1 : 0;
+                //            }
+                //        }
+                //    }
+                //}
             }
+
+            newDepth += extensions;
 
 
             // __Make the move__
             _board.MakeMove(moves[i]);
 
-
-            // __[[Late Move Reduction]]__
-            // Research on a fail high; move could be good
-
-
-            // __Full-depth search when LMR is skipped__
-
+            //if (!quies && !isPV)
+            //{
+            //    eval = -Search(newPly, -alpha-1, -alpha, newDepth, pv);
+            //}
 
             // __Perform the full depth search__
             // If we dove into quies or we have to research with a full
-            // window after LMR was skipped.
-            eval = -Search(ply, -beta, -alpha, depth, !cutNode, i == 0);
+            // window after LMR was skipped or we get a fail high/low.
+            //if (quies || eval > alpha && eval < beta || isPV)
+            eval = -Search(newPly, -beta, -alpha, newDepth, pv);
+            
+            
 
 
             // __Undo Move__
@@ -273,7 +335,6 @@ public class MyBot : IChessBot
 
                     if (eval >= beta)
                     {
-                        stack.CutoffCount++;
                         stack.Killer = moves[i];
                         break;
                     }
@@ -285,16 +346,17 @@ public class MyBot : IChessBot
 
 
         // __Check for mate and stalemate__
-        if (!quies && moves.Length == 0)
+        if (!quies 
+            && moves.Length == 0)
             return _board.IsInCheck() ? ply - (int)Value.VALUE_MATE : (int)Value.VALUE_DRAW;
         
 
 
         // __Make TTEntry__
         Bound bound = bestEval >= beta ? Bound.BOUND_LOWER : bestEval > parentAlpha ? Bound.BOUND_EXACT : Bound.BOUND_UPPER;
-        if (!root) tte = new TTEntry(bestMove, bestEval, stack.StaticEval, depth, pvNode, bound);
+        if (!root) tte = new TTEntry(bestMove, bestEval, stack.StaticEval, depth, isPV, bound);
 
-        if (root || pvNode)
+        if (root || isPV)
         {
             stack.Eval = bestEval;
             stack.Pv = bestMove;
