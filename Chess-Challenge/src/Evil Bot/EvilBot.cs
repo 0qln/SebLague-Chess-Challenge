@@ -3,6 +3,7 @@ using System;
 
 namespace ChessChallenge.Example
 {
+    // elo = 1000 used as standart
     public class EvilBot : IChessBot
     {
         Move bestmoveRoot = Move.NullMove;
