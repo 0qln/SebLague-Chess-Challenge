@@ -1,18 +1,21 @@
-﻿using ChessChallenge.API;
+﻿//#define UCI
+//#define DEBUG
+
+using ChessChallenge.API;
 using System;
 using System.Numerics;
 using System.Collections.Generic;
 using System.Linq;
-using System.Diagnostics; // USED ONLY FOR `Debugger.IsAttached`
+
 
 public class MyBot : IChessBot
 {
     // Initialization
     // ==============
     // 
-    public MyBot() 
+    public MyBot()
     {
-        int ctr=0;
+        int ctr = 0;
         // Big table packed with data from premade piece square tables
         // Access using using PackedEvaluationTables[square][pieceType] = score
         UnpackedPestoTables = new[] {
@@ -51,7 +54,12 @@ public class MyBot : IChessBot
     //int Beta (int value) => Math.Min(value, (int)Value.VALUE_INFINITE);
     // [Used_time] > [Total_time] / [Avarage_moves_in_a_game]
     bool EnoughTime => _timer.MillisecondsElapsedThisTurn <= _timer.MillisecondsRemaining / Divisor;
+#if !UCI 
     int Divisor => 30 + 100000 / _timer.GameStartTimeMilliseconds;
+#else
+    int Divisor => 30;
+#endif
+
 
     //int Reduction(int i) => 20 * (int)Math.Log(i);
 
@@ -62,7 +70,9 @@ public class MyBot : IChessBot
     Timer _timer;
     Board _board;
 
+#if DEBUG
     long _nodesSearched = 0;
+#endif
 
     // storing data foreach ply, indexed by `ply` + `STACK_DUMMIES`
     Stack[] _stacks = new Stack[(int)Value.MAX_PLY + STACK_DUMMIES];
@@ -71,7 +81,7 @@ public class MyBot : IChessBot
     // performing worse when marked as `static`... i believe
     // this shouldn't be case for a good TT implementation
     TTEntry[] _TT = new TTEntry[0x400000];
-    
+
     int _rootDepth;
 
 
@@ -86,23 +96,30 @@ public class MyBot : IChessBot
         _stacks.Initialize();
         _timer = timer;
         _board = board;
+
+#if DEBUG
         _nodesSearched = 0;
+#endif
 
         // Iterative Deepening
         _rootDepth = 0;
-        while ( ++_rootDepth < (int)Value.MAX_PLY
+        while (++_rootDepth < (int)Value.MAX_PLY
                 && EnoughTime)
         {
-            Search(0, -(int)Value.VALUE_INFINITE, (int)Value.VALUE_INFINITE, _rootDepth, 4);
-        }
-        
-        if (Debugger.IsAttached) //#DEBUG
-        {
-            Console.WriteLine($"Depth: {_rootDepth}"); //#DEBUG
-            Console.WriteLine($"kNPS: {_nodesSearched / (1+_timer.MillisecondsElapsedThisTurn)}"); //#DEBUG
+            Search(0, -(int)Value.VALUE_INFINITE, (int)Value.VALUE_INFINITE, _rootDepth, true);
+
+
+#if DEBUG
+        Console.WriteLine(StringPV);
+#endif
         }
 
-        
+#if DEBUG
+        Console.WriteLine($"Depth: {_rootDepth}");
+        Console.WriteLine($"kNPS: {_nodesSearched / (1 + _timer.MillisecondsElapsedThisTurn)}");
+#endif
+
+
         // The best move should now be on the bottom,
         // play the last move in the `_rootMoves` array
         return _stacks[STACK_DUMMIES].Pv;
@@ -112,26 +129,28 @@ public class MyBot : IChessBot
 
     // Helper functions
     // ================
-    string StringPV => "PV " + new string(CharPV); //#DEBUG
-    char[] CharPV => PvStrings().SelectMany(x => x.ToCharArray()).ToArray(); //DEBUG
+#if DEBUG
+    string StringPV => "PV " + new string(CharPV); 
+    char[] CharPV => PvStrings().SelectMany(x => x.ToCharArray()).ToArray();
     string[] PvStrings()
     {
-        string[] moves = PV.Select(x => x.IsNull ? "" : ExtractMove(x)).ToArray(); //#DEBUG
-        string[] evals = PvEvals.Select(x => x.ToString() + "").ToArray(); //#DEBUG
-        string[] staticEvals = StaticPvEvals.Select(x => x.ToString() + "").ToArray(); //#DEBUG
+        string[] moves = PV.Select(x => x.IsNull ? "" : ExtractMove(x)).ToArray();
+        string[] evals = PvEvals.Select(x => x.ToString() + "").ToArray(); 
+        string[] staticEvals = StaticPvEvals.Select(x => x.ToString() + "").ToArray(); 
 
         string[] result = new string[moves.Length];
         for (int i = 0; i < moves.Length; i++)
-            result[i] = moves[i] == "" ? "" : moves[i] + "("+evals[i]+"|" + staticEvals[i] + ")";
+            result[i] = moves[i] == "" ? "" : moves[i] + "(" + evals[i] + "|" + staticEvals[i] + ")";
 
         return result;
     }
 
-    Move[] PV => _stacks.Select(x => x.Pv).ToArray(); //#DEBUG
-    int[] PvEvals => _stacks.Select(x => x.Eval).ToArray(); //#DEBUG
-    int[] StaticPvEvals => _stacks.Select(x => x.StaticPvEval).ToArray(); //#DEBUG
+    Move[] PV => _stacks.Select(x => x.Pv).ToArray(); 
+    int[] PvEvals => _stacks.Select(x => x.Eval).ToArray();
+    int[] StaticPvEvals => _stacks.Select(x => x.StaticPvEval).ToArray();
 
-    string ExtractMove(Move x) => x.ToString().Replace("Move", "").Replace(":", ""); //#DEBUG
+    string ExtractMove(Move x) => x.ToString().Replace("Move", "").Replace(":", "");
+#endif
 
 
 
@@ -141,9 +160,11 @@ public class MyBot : IChessBot
     /// Recursive search function with quies search.
     /// </summary>
     /// <returns></returns>
-    int Search(int ply, int alpha, int beta, int depth, int pvNode)
+    int Search(int ply, int alpha, int beta, int depth, bool isPV)
     {
-        if (Debugger.IsAttached) ++_nodesSearched; //#DEBUG
+#if DEBUG
+        ++_nodesSearched; 
+#endif
 
         // __Quiescence search__
         ref Stack stack = ref _stacks[/*++*/ply + STACK_DUMMIES];
@@ -151,8 +172,8 @@ public class MyBot : IChessBot
         bool root = ply == 0, quies = /*--*/depth <= 0/* && !_board.IsInCheck()*/, ttHit = tte != default;
         int bestEval = -(int)Value.VALUE_INFINITE, eval, parentAlpha = alpha;
         //`default` is the same as the paramterless contsr., which is the same as Move.NullMove
-        Move bestMove = default; 
-        bool excludedMove = stack.ExcludedMove != default, isPV = pvNode >= 0;
+        Move bestMove = default;
+        bool excludedMove = stack.ExcludedMove != default;
 
 
         if (!root)
@@ -164,7 +185,7 @@ public class MyBot : IChessBot
 
             // __Bounds Check__
             // We can assume that we will never reach a ply of 246.
-            
+
 
             // __Mate distance pruning__
 
@@ -202,8 +223,8 @@ public class MyBot : IChessBot
                 move == stack.Killer ? 10000 :
 
                 // mvv lva
-                move.IsCapture ? 50 * (int)move.CapturePieceType - (int)move.MovePieceType 
-                
+                move.IsCapture ? 50 * (int)move.CapturePieceType - (int)move.MovePieceType
+
                 : 0
             );
         }
@@ -248,18 +269,18 @@ public class MyBot : IChessBot
             if (bestEval >= beta)
                 return bestEval;
 
-            if (bestEval > alpha) 
+            if (bestEval > alpha)
                 alpha = bestEval;
         }
 
 
         // __Loop through all legal moves__
-        for(int i = 0; i < moves.Length; i++)
+        for (int i = 0; i < moves.Length; i++)
         {
-            int newDepth = depth-1, 
-                newPly = ply+1,
+            int newDepth = depth - 1,
+                newPly = ply + 1,
                 extensions = 0;
-            int pv = 5-i;
+            bool pv = i < 5;
 
             if (!quies)
             {
@@ -314,17 +335,16 @@ public class MyBot : IChessBot
             // window after LMR was skipped or we get a fail high/low.
             //if (quies || eval > alpha && eval < beta || isPV)
             eval = -Search(newPly, -beta, -alpha, newDepth, pv);
-            
-            
+
+
 
 
             // __Undo Move__
             _board.UndoMove(moves[i]);
 
-            //if (root) Console.WriteLine($"{moves[i]}: {eval}");
 
             // __Check for a new best move___
-            if (eval > bestEval) 
+            if (eval > bestEval)
             {
                 bestEval = eval;
 
@@ -346,10 +366,10 @@ public class MyBot : IChessBot
 
 
         // __Check for mate and stalemate__
-        if (!quies 
+        if (!quies
             && moves.Length == 0)
             return _board.IsInCheck() ? ply - (int)Value.VALUE_MATE : (int)Value.VALUE_DRAW;
-        
+
 
 
         // __Make TTEntry__
@@ -361,24 +381,10 @@ public class MyBot : IChessBot
             stack.Eval = bestEval;
             stack.Pv = bestMove;
 
-
-            if (Debugger.IsAttached) //#DEBUG
-            { //#DEBUG
-
-                stack.StaticPvEval = Evaluate(); //#DEBUG
-
-            } //#DEBUG
+#if DEBUG
+            stack.StaticPvEval = Evaluate(); 
+#endif
         }
-
-        if (root && Debugger.IsAttached)  //#DEBUG
-        { //#DEBUG
-
-
-            ///Console.WriteLine(StringPV); //#DEBUG
-
-
-        } //#DEBUG
-
 
         return bestEval;
     }
@@ -419,7 +425,7 @@ public class MyBot : IChessBot
 
 // For some reason the `public` modifier
 // does not count as a token, so this: 
-/*record struct Stack
+/**record struct Stack
 (
     Move Pv,
     int Ply,
@@ -435,7 +441,7 @@ public class MyBot : IChessBot
     bool TtHit,
     int DoubleExtensions,
     int CutoffCnt
-);*/
+);**/
 // produces the same amount of tokens. 
 // But it is actually 1 token more expensive,
 // because of the semicolon at the end.
@@ -455,7 +461,9 @@ record struct Stack
     public int DoubleExtensions;
     public int CutoffCount;
 
-    public int StaticPvEval; //#DEBUG
+#if DEBUG
+    public int StaticPvEval; 
+#endif
 }
 record struct TTEntry
 (
