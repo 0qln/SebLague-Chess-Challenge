@@ -1,5 +1,6 @@
-﻿//#define UCI
+﻿#define UCI
 //#define DEBUG
+//#define EXPERIMENTAL
 
 using ChessChallenge.API;
 using System;
@@ -280,7 +281,7 @@ public class MyBot : IChessBot
             int newDepth = depth - 1,
                 newPly = ply + 1,
                 extensions = 0;
-            bool pv = i < 5;
+            bool pv = i < 1;
 
             if (!quies)
             {
@@ -325,19 +326,22 @@ public class MyBot : IChessBot
             // __Make the move__
             _board.MakeMove(moves[i]);
 
-            //if (!quies && !isPV)
-            //{
-            //    eval = -Search(newPly, -alpha-1, -alpha, newDepth, pv);
-            //}
 
+#if EXPERIMENTAL
             // __Perform the full depth search__
             // If we dove into quies or we have to research with a full
             // window after LMR was skipped or we get a fail high/low.
-            //if (quies || eval > alpha && eval < beta || isPV)
+            if (quies || pv)
+            {
+                eval = -Search(newPly, -beta, -alpha, newDepth, true);
+            }
+            else
+            {
+                eval = -Search(newPly, -alpha - 1, -alpha, newDepth - 2, false);
+            }
+#else
             eval = -Search(newPly, -beta, -alpha, newDepth, pv);
-
-
-
+#endif
 
             // __Undo Move__
             _board.UndoMove(moves[i]);
