@@ -168,6 +168,8 @@ public class MyBot : IChessBot
 #endif
 
         // __Quiescence search__
+        // At last, we want to forget all the soft-spoken, quiescent souls, 
+        // and have a deeper look at our more engaging children. :p
         ref Stack stack = ref _stacks[/*++*/ply + STACK_DUMMIES];
         ref TTEntry tte = ref _TT[_board.ZobristKey % 0x400000];
         bool root = ply == 0, quies = /*--*/depth <= 0/* && !_board.IsInCheck()*/, ttHit = tte != default;
